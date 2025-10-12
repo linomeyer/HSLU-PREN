@@ -36,7 +36,7 @@ class EdgeExtractor:
     def __init__(self, piece, piece_id: int = 0):
         """
         Initialize edge extractor for a puzzle piece.
-        
+
         Args:
             piece: PuzzlePiece object from piece_segmentation
             piece_id: Identifier for the piece
@@ -49,10 +49,10 @@ class EdgeExtractor:
     def extract_edges(self, num_corners: int = 4) -> List[PuzzleEdge]:
         """
         Extract and classify all edges of the puzzle piece.
-        
+
         Args:
             num_corners: Expected number of corners (default: 4)
-            
+
         Returns:
             List of PuzzleEdge objects
         """
@@ -80,7 +80,8 @@ class EdgeExtractor:
 
     def _find_corners(self, contour: np.ndarray, num_corners: int = 4) -> List[Tuple[int, int]]:
         """
-        Find corner points of the puzzle piece.
+        Find corner points of the puzzle piece using a simple bounding box approach.
+        Since puzzle pieces are quadrilateral, we can use the oriented bounding box.
 
         Args:
             contour: Contour points
@@ -89,149 +90,100 @@ class EdgeExtractor:
         Returns:
             List of corner coordinates
         """
-        # Method 1: Approximate polygon to find corners
-        epsilon = 0.02 * cv2.arcLength(contour, True)
-        approx = cv2.approxPolyDP(contour, epsilon, True)
-
-        # If we got roughly the right number of corners, use them
-        if num_corners <= len(approx) <= num_corners + 2:
-            corners = [tuple(point[0]) for point in approx[:num_corners]]
-            return self._order_corners(corners)
-
-        # Method 2: Use convexity defects and corner detection
-        # Get convex hull
-        hull = cv2.convexHull(contour, returnPoints=False)
-
-        if len(hull) > 3:
-            defects = cv2.convexityDefects(contour, hull)
-
-            # Find points with high corner response
-            corners = self._find_corner_points_harris(contour)
-
-            if len(corners) >= num_corners:
-                return self._order_corners(corners[:num_corners])
-
-        # Method 3: Find extreme points (fallback)
-        corners = self._find_extreme_points(contour)
-        return self._order_corners(corners)
-
-    def _find_corner_points_harris(self, contour: np.ndarray) -> List[Tuple[int, int]]:
-        """Find corners using Harris corner detection on the piece mask."""
-        # Create a mask image for this piece
-        mask = np.zeros((self.piece.mask.shape[0], self.piece.mask.shape[1]), dtype=np.uint8)
-        cv2.drawContours(mask, [contour], -1, 255, 2)
-
-        # Apply Harris corner detection
-        corners_response = cv2.cornerHarris(mask, blockSize=5, ksize=3, k=0.04)
-
-        # Dilate to mark corners
-        corners_response = cv2.dilate(corners_response, None)
-
-        # Threshold for strong corners
-        threshold = 0.01 * corners_response.max()
-        corner_coords = np.where(corners_response > threshold)
+        # Use minimum area rectangle (oriented bounding box)
+        # This works great for quadrilateral puzzle pieces
+        rect = cv2.minAreaRect(contour)
+        box = cv2.boxPoints(rect)
+        box = box.astype(np.int32)  # Convert to integers
 
         # Convert to list of tuples
-        corners = list(zip(corner_coords[1], corner_coords[0]))
+        corners = [tuple(point) for point in box]
 
-        # Cluster nearby points and take centroids
-        if len(corners) > 4:
-            corners = self._cluster_corners(corners, max_clusters=4)
-
-        return corners
-
-    def _find_extreme_points(self, contour: np.ndarray) -> List[Tuple[int, int]]:
-        """Find the four extreme points (top, right, bottom, left)."""
-        # Reshape contour for easier processing
-        points = contour.reshape(-1, 2)
-
-        # Find extreme points
-        top = tuple(points[points[:, 1].argmin()])
-        bottom = tuple(points[points[:, 1].argmax()])
-        left = tuple(points[points[:, 0].argmin()])
-        right = tuple(points[points[:, 0].argmax()])
-
-        return [top, right, bottom, left]
-
-    def _cluster_corners(self, corners: List[Tuple[int, int]], max_clusters: int = 4) -> List[Tuple[int, int]]:
-        """Cluster nearby corner points and return centroids."""
-        if len(corners) <= max_clusters:
-            return corners
-
-        corners_array = np.array(corners, dtype=np.float32)
-
-        # Use k-means clustering
-        criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 100, 0.2)
-        _, labels, centers = cv2.kmeans(corners_array, max_clusters, None, criteria, 10,
-                                        cv2.KMEANS_PP_CENTERS)
-
-        return [tuple(map(int, center)) for center in centers]
+        # Order the corners properly
+        return self._order_corners(corners)
 
     def _order_corners(self, corners: List[Tuple[int, int]]) -> List[Tuple[int, int]]:
         """
-        Order corners in clockwise order starting from top-left.
-        Returns: [top-left, top-right, bottom-right, bottom-left]
+        Order corners in consistent order: [top-left, top-right, bottom-right, bottom-left]
+
+        Args:
+            corners: List of 4 corner points
+
+        Returns:
+            Ordered list of corners
         """
-        if len(corners) < 4:
+        if len(corners) != 4:
             return corners
 
         # Convert to numpy array
-        corners_array = np.array(corners)
+        corners_array = np.array(corners, dtype=np.float32)
 
-        # Sort by y-coordinate
-        sorted_by_y = corners_array[np.argsort(corners_array[:, 1])]
+        # Find center point
+        center = np.mean(corners_array, axis=0)
 
-        # Top two points
-        top_points = sorted_by_y[:2]
-        top_left = top_points[np.argmin(top_points[:, 0])]
-        top_right = top_points[np.argmax(top_points[:, 0])]
+        # Calculate angle from center to each corner
+        angles = np.arctan2(corners_array[:, 1] - center[1],
+                            corners_array[:, 0] - center[0])
 
-        # Bottom two points
-        bottom_points = sorted_by_y[2:4]
-        bottom_left = bottom_points[np.argmin(bottom_points[:, 0])]
-        bottom_right = bottom_points[np.argmax(bottom_points[:, 0])]
+        # Sort by angle (counterclockwise from right)
+        sorted_indices = np.argsort(angles)
+        sorted_corners = corners_array[sorted_indices]
 
-        ordered = [
-            tuple(top_left),
-            tuple(top_right),
-            tuple(bottom_right),
-            tuple(bottom_left)
-        ]
+        # Find top-left (smallest x+y sum)
+        sums = sorted_corners[:, 0] + sorted_corners[:, 1]
+        top_left_idx = np.argmin(sums)
 
-        return ordered
+        # Rotate array so top-left is first, then reverse for clockwise
+        # Going clockwise: top-left -> top-right -> bottom-right -> bottom-left
+        reordered = np.roll(sorted_corners, -top_left_idx, axis=0)
+
+        # Check if we need to reverse (make sure we go clockwise)
+        # If second point is to the left of first point, we're going counterclockwise
+        if reordered[1][0] < reordered[0][0]:
+            reordered = np.vstack([reordered[0], reordered[:0:-1]])
+
+        return [tuple(corner) for corner in reordered]
 
     def _split_contour_by_corners(self, contour: np.ndarray, corners: List[Tuple[int, int]]) -> List[np.ndarray]:
         """
-        Split contour into segments between corner points.
+        Split contour into 4 edge segments between corner points.
+        Returns edges in order: [top, right, bottom, left]
+
+        Args:
+            contour: The contour points
+            corners: Ordered corner points [top-left, top-right, bottom-right, bottom-left]
 
         Returns:
-            List of 4 edge segments (top, right, bottom, left)
+            List of 4 edge segments
         """
-        # Flatten contour for easier searching
         contour_points = contour.reshape(-1, 2)
 
-        # Find indices of corners in the contour
+        # Find the contour indices closest to each corner
         corner_indices = []
         for corner in corners:
-            # Find the closest point in contour to this corner
             distances = np.linalg.norm(contour_points - np.array(corner), axis=1)
             closest_idx = np.argmin(distances)
             corner_indices.append(closest_idx)
 
-        # Sort indices to maintain order along contour
-        corner_indices.sort()
+        # Ensure indices are in contour order
+        corner_indices = sorted(corner_indices)
 
-        # Split contour into segments
+        # Split contour into 4 segments
         segments = []
-        for i in range(len(corner_indices)):
+        num_corners = len(corner_indices)
+
+        for i in range(num_corners):
             start_idx = corner_indices[i]
-            end_idx = corner_indices[(i + 1) % len(corner_indices)]
+            end_idx = corner_indices[(i + 1) % num_corners]
 
             if end_idx > start_idx:
-                segment = contour_points[start_idx:end_idx]
+                segment = contour_points[start_idx:end_idx + 1]
             else:
-                # Wrap around
-                segment = np.vstack([contour_points[start_idx:], contour_points[:end_idx]])
+                # Handle wrap-around at the end of contour
+                segment = np.vstack([
+                    contour_points[start_idx:],
+                    contour_points[:end_idx + 1]
+                ])
 
             segments.append(segment)
 
@@ -240,10 +192,10 @@ class EdgeExtractor:
     def _classify_edge(self, edge_points: np.ndarray) -> EdgeType:
         """
         Classify an edge as FLAT, TAB, or BLANK.
-        
+
         Args:
             edge_points: Array of points along the edge
-            
+
         Returns:
             EdgeType classification
         """
@@ -265,7 +217,7 @@ class EdgeExtractor:
             return EdgeType.UNKNOWN
 
         # Threshold for flat edge (small deviation = straight line)
-        FLAT_THRESHOLD = 1.15  # Less than 15% deviation
+        FLAT_THRESHOLD = 1.12  # Less than 12% deviation (more strict)
 
         if deviation_ratio < FLAT_THRESHOLD:
             return EdgeType.FLAT
@@ -283,27 +235,35 @@ class EdgeExtractor:
         edge_direction = edge_vector / edge_length
         perpendicular = np.array([-edge_direction[1], edge_direction[0]])
 
-        # Find the point on the edge that's furthest from the straight line
-        max_distance = 0
-        max_side = 0
-
+        # Calculate signed distances for all points
+        signed_distances = []
         for point in edge_points:
             # Vector from start to this point
             point_vector = point - start_point
 
             # Project onto perpendicular direction
             projection = np.dot(point_vector, perpendicular)
+            signed_distances.append(projection)
 
-            if abs(projection) > abs(max_distance):
-                max_distance = projection
-                max_side = np.sign(projection)
+        signed_distances = np.array(signed_distances)
+
+        # Use the median of the absolute values to determine direction
+        # This is more robust than just finding the maximum
+        positive_distances = signed_distances[signed_distances > 0]
+        negative_distances = signed_distances[signed_distances < 0]
+
+        # Calculate the "mass" on each side
+        positive_mass = np.sum(positive_distances) if len(positive_distances) > 0 else 0
+        negative_mass = np.sum(np.abs(negative_distances)) if len(negative_distances) > 0 else 0
 
         # Threshold for distinguishing tab from blank
-        TAB_BLANK_THRESHOLD = straight_distance * 0.05  # 5% of edge length
+        TAB_BLANK_THRESHOLD = straight_distance * 0.08  # 8% of edge length
 
-        if abs(max_distance) < TAB_BLANK_THRESHOLD:
+        max_deviation = max(abs(positive_mass), abs(negative_mass)) / len(edge_points)
+
+        if max_deviation < TAB_BLANK_THRESHOLD:
             return EdgeType.FLAT
-        elif max_side > 0:
+        elif positive_mass > negative_mass:
             return EdgeType.TAB
         else:
             return EdgeType.BLANK
@@ -392,7 +352,7 @@ class EdgeExtractor:
         # Draw corners
         if show_corners and self.corners:
             for corner in self.corners:
-                local_corner = (corner[0] - x, corner[1] - y)
+                local_corner = (int(corner[0]) - x, int(corner[1]) - y)
                 cv2.circle(viz_image, local_corner, 8, (255, 255, 0), -1)
                 cv2.circle(viz_image, local_corner, 10, (0, 0, 0), 2)
 
