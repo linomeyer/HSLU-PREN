@@ -3,6 +3,7 @@ Jigsaw Puzzle Solver - Main Entry Point
 """
 
 from edge_extraction import process_all_pieces
+from edge_matching import match_puzzle_pieces
 from piece_segmentation import PieceSegmenter, PieceVisualizer
 
 
@@ -49,7 +50,15 @@ def main():
         extractors = process_all_pieces(pieces, visualize=True)
 
         # ====================================================================
-        # Step 3: Summary and Analysis
+        # Step 3: Match edges between pieces
+        # ====================================================================
+        print("\n[Step 3] Matching puzzle piece edges...")
+        print("-" * 60)
+
+        matcher = match_puzzle_pieces(extractors, shape_weight=0.7, color_weight=0.3, visualize=True)
+
+        # ====================================================================
+        # Step 4: Summary and Analysis
         # ====================================================================
         print("\n" + "=" * 60)
         print("PUZZLE ANALYSIS SUMMARY")
